@@ -379,6 +379,80 @@
     font-size: 0.82rem;
     padding: 2px 0;
   }
+
+  /* Month calendar */
+  .calendar-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 3px;
+    margin-bottom: 6px;
+  }
+  .cal-dow {
+    text-align: center;
+    font-size: 0.62rem;
+    color: var(--ink-soft);
+    letter-spacing: 0.01em;
+    padding-bottom: 3px;
+  }
+  .cal-cell {
+    min-height: 72px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0px;
+    border-radius: 3px;
+    background: var(--panel);
+    border: 1px solid var(--panel-edge);
+    cursor: pointer;
+    padding: 3px 1px;
+    overflow: hidden;
+  }
+  .cal-cell.empty { background: transparent; border-color: transparent; cursor: default; }
+  .cal-cell.weekend { opacity: 0.4; cursor: default; }
+  .cal-cell.today { border-color: var(--amber); }
+  .cal-cell.selected { border-color: var(--teal); border-width: 2px; }
+  .cal-date {
+    font-size: 0.66rem;
+    font-weight: 700;
+    margin-bottom: 2px;
+  }
+  .cal-line {
+    font-family: 'SF Mono', 'Roboto Mono', 'Courier New', monospace;
+    font-size: 0.56rem;
+    line-height: 1.35;
+    white-space: nowrap;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cal-line.in { color: var(--amber); }
+  .cal-line.out { color: var(--teal); }
+  .cal-hrs {
+    font-family: 'SF Mono', 'Roboto Mono', 'Courier New', monospace;
+    font-size: 0.6rem;
+    font-weight: 700;
+    color: var(--ink);
+    margin-top: 2px;
+    white-space: nowrap;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cal-legend {
+    display: flex;
+    gap: 14px;
+    justify-content: center;
+    font-size: 0.72rem;
+    color: var(--ink-soft);
+    margin: 2px 0 12px;
+  }
+  .cal-legend span::before {
+    content: '●';
+    margin-right: 4px;
+  }
+  .cal-legend .leg-in::before { color: var(--amber); }
+  .cal-legend .leg-out::before { color: var(--teal); }
 </style>
 </head>
 <body>
@@ -425,12 +499,24 @@
       <span class="figure" id="weekTotal">0h 0m</span>
     </div>
 
-    <!-- Mon-Fri Detailed Ledger & Excel Export -->
+    <!-- Month Detailed Ledger & Excel Export -->
     <div class="section-label" style="display:flex; justify-content:space-between; align-items:center; margin-top:32px;">
-      <span>Mon – Fri Entries</span>
+      <span>Month Entries</span>
       <button id="exportExcelBtn" class="small-btn" style="flex:none; padding:4px 10px;" type="button">📥 Export Excel</button>
     </div>
-    <div id="weeklyLedger"></div>
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
+      <button class="mini-btn" id="prevMonthBtn" type="button" style="flex:none; padding:6px 12px;">◀</button>
+      <span id="monthTitle" style="font-weight:600; font-size:0.9rem;"></span>
+      <button class="mini-btn" id="nextMonthBtn" type="button" style="flex:none; padding:6px 12px;">▶</button>
+    </div>
+    <div class="cal-legend"><span class="leg-in">in</span><span class="leg-out">out</span></div>
+    <div class="calendar-grid" id="calendarGrid"></div>
+    <div class="ledger-caption" style="margin-top:2px;">Tap a weekday to see its punch detail.</div>
+    <div class="mon-fri-block" id="dayDetail"></div>
+    <div class="totals-row">
+      <span>Month total</span>
+      <span class="figure" id="monthTotal">0h 0m</span>
+    </div>
 
     <div class="sync-note" id="syncNote">Connecting…</div>
 
@@ -459,7 +545,34 @@
   const weekTotalEl = document.getElementById('weekTotal');
   const syncNote = document.getElementById('syncNote');
   const exportExcelBtn = document.getElementById('exportExcelBtn');
-  const weeklyLedger = document.getElementById('weeklyLedger');
+  const calendarGrid = document.getElementById('calendarGrid');
+  const dayDetail = document.getElementById('dayDetail');
+  const prevMonthBtn = document.getElementById('prevMonthBtn');
+  const nextMonthBtn = document.getElementById('nextMonthBtn');
+  const monthTitle = document.getElementById('monthTitle');
+  const monthTotalEl = document.getElementById('monthTotal');
+
+  // Which day is shown in the detail panel under the calendar.
+  let selectedDayKey = null;
+
+  // Which month is currently shown in the calendar / export.
+  // Defaults to the current month; the ◀ / ▶ buttons move this around, and
+  // all history stays in localStorage so past months are always browsable.
+  let viewMonthDate = new Date();
+  viewMonthDate.setDate(1);
+
+  function getMonthWeekdays(viewDate) {
+    const year = viewDate.getFullYear();
+    const month = viewDate.getMonth();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const result = [];
+    for (let day = 1; day <= daysInMonth; day++) {
+      const d = new Date(year, month, day);
+      const dow = d.getDay(); // 0 = Sun ... 6 = Sat
+      if (dow >= 1 && dow <= 5) result.push(d);
+    }
+    return result;
+  }
 
   const pad = n => String(n).padStart(2, '0');
   const dateStr = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -676,51 +789,105 @@
     weekGrid.innerHTML = chips;
     weekTotalEl.textContent = fmtDur(weekTotal);
 
-    // Render Mon - Fri Entries Block — same effective in/out collapsing as today
-    const dowsFull = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
-    let weeklyHtml = '';
-    for (let i = 0; i < 5; i++) {
-      const d = new Date(weekStart);
-      d.setDate(weekStart.getDate() + i);
+    // Render Month calendar — a grid with one cell per day of viewMonthDate's
+    // month. Weekdays show their effective (collapsed) worked hours; weekends
+    // are dimmed since punches aren't tracked for them. Tapping a weekday
+    // shows its detail (IN/OUT, ignored punches) in the panel below.
+    const dowNamesFull = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const dowLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const year = viewMonthDate.getFullYear();
+    const month = viewMonthDate.getMonth();
+    const firstOfMonth = new Date(year, month, 1);
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const firstDow = (firstOfMonth.getDay() + 6) % 7; // 0 = Monday offset
+
+    let calHtml = dowLabels.map(l => `<div class="cal-dow">${l}</div>`).join('');
+    for (let i = 0; i < firstDow; i++) {
+      calHtml += `<div class="cal-cell empty"></div>`;
+    }
+
+    let monthTotalMs = 0;
+    for (let day = 1; day <= daysInMonth; day++) {
+      const d = new Date(year, month, day);
       const key = dateStr(d);
-      const doc = daysCache[key] || { date: key, punches: [] };
-      const dayPunches = normalizeDayPunches(doc.punches || []);
-      const dayMs = workedMs(dayPunches, key === todayKey ? now.getTime() : null);
-      const eff = getEffectiveDayPunches(dayPunches);
+      const dow = d.getDay();
+      const isWeekend = dow === 0 || dow === 6;
+      const isToday = key === todayKey;
+      const isSelected = key === selectedDayKey;
 
-      weeklyHtml += `<div class="mon-fri-block">
-        <div class="mon-fri-title">
-          <span>${dowsFull[i]} (${key})</span>
-          <span>${fmtDur(dayMs)}</span>
-        </div>`;
+      let cellExtraHtml = '';
+      if (!isWeekend) {
+        const doc = daysCache[key];
+        const dayPunches = doc ? normalizeDayPunches(doc.punches || []) : [];
+        const dayMs = workedMs(dayPunches, key === todayKey ? now.getTime() : null);
+        monthTotalMs += dayMs;
+        const eff = getEffectiveDayPunches(dayPunches);
 
-      if (dayPunches.length === 0) {
-        weeklyHtml += `<div class="empty-note" style="padding:0;">No entries recorded</div>`;
-      } else {
-        if (eff.inPunch) {
-          const t = new Date(eff.inPunch.ts);
-          weeklyHtml += `<div class="mon-fri-row">
-            <span><strong style="color:var(--amber)">IN</strong> at ${shortTime(t)}</span>
-            <span style="color:var(--ink-soft); font-family:monospace;"></span>
-          </div>`;
-        }
-        if (eff.outPunch) {
-          const t = new Date(eff.outPunch.ts);
-          weeklyHtml += `<div class="mon-fri-row">
-            <span><strong style="color:var(--teal)">OUT</strong> at ${shortTime(t)}</span>
-            <span style="color:var(--ink-soft); font-family:monospace;"></span>
-          </div>`;
-        }
-        if (!eff.inPunch && !eff.outPunch) {
-          weeklyHtml += `<div class="empty-note" style="padding:0;">No valid in/out (first punch at/after 1PM)</div>`;
-        }
-        if (eff.ignored.length > 0) {
-          weeklyHtml += `<div class="empty-note" style="padding:4px 0 0;">${eff.ignored.length} other punch${eff.ignored.length > 1 ? 'es' : ''} ignored</div>`;
+        const time24 = t => `${pad(t.getHours())}:${pad(t.getMinutes())}`;
+
+        if (dayPunches.length) {
+          const inLine = eff.inPunch ? `<div class="cal-line in">${time24(new Date(eff.inPunch.ts))}</div>` : `<div class="cal-line in">-</div>`;
+          const outLine = eff.outPunch ? `<div class="cal-line out">${time24(new Date(eff.outPunch.ts))}</div>` : `<div class="cal-line out">-</div>`;
+          const hrsLabel = fmtDur(dayMs).replace(' ', '');
+          cellExtraHtml = `${inLine}${outLine}<div class="cal-hrs">${hrsLabel}</div>`;
         }
       }
-      weeklyHtml += `</div>`;
+
+      const classes = ['cal-cell'];
+      if (isWeekend) classes.push('weekend');
+      if (isToday) classes.push('today');
+      if (isSelected) classes.push('selected');
+
+      calHtml += `<div class="${classes.join(' ')}" data-key="${key}" data-weekend="${isWeekend}">
+        <div class="cal-date">${day}</div>
+        ${cellExtraHtml}
+      </div>`;
     }
-    weeklyLedger.innerHTML = weeklyHtml;
+    calendarGrid.innerHTML = calHtml;
+    monthTotalEl.textContent = fmtDur(monthTotalMs);
+    monthTitle.textContent = viewMonthDate.toLocaleDateString([], { month: 'long', year: 'numeric' });
+
+    // Detail panel for the selected day
+    if (selectedDayKey) {
+      const [sy, sm, sd] = selectedDayKey.split('-').map(Number);
+      const sDate = new Date(sy, sm - 1, sd);
+      const sDoc = daysCache[selectedDayKey] || { date: selectedDayKey, punches: [] };
+      const sPunches = normalizeDayPunches(sDoc.punches || []);
+      const sMs = workedMs(sPunches, selectedDayKey === todayKey ? now.getTime() : null);
+      const sEff = getEffectiveDayPunches(sPunches);
+
+      let detailHtml = `<div class="mon-fri-title">
+        <span>${dowNamesFull[sDate.getDay()]} (${selectedDayKey})</span>
+        <span>${fmtDur(sMs)}</span>
+      </div>`;
+      if (sPunches.length === 0) {
+        detailHtml += `<div class="empty-note" style="padding:0;">No entries recorded</div>`;
+      } else {
+        if (sEff.inPunch) {
+          detailHtml += `<div class="mon-fri-row">
+            <span><strong style="color:var(--amber)">IN</strong> at ${shortTime(new Date(sEff.inPunch.ts))}</span>
+            <span></span>
+          </div>`;
+        }
+        if (sEff.outPunch) {
+          detailHtml += `<div class="mon-fri-row">
+            <span><strong style="color:var(--teal)">OUT</strong> at ${shortTime(new Date(sEff.outPunch.ts))}</span>
+            <span></span>
+          </div>`;
+        }
+        if (!sEff.inPunch && !sEff.outPunch) {
+          detailHtml += `<div class="empty-note" style="padding:0;">No valid in/out (first punch at/after 1PM)</div>`;
+        }
+        if (sEff.ignored.length > 0) {
+          detailHtml += `<div class="empty-note" style="padding:4px 0 0;">${sEff.ignored.length} other punch${sEff.ignored.length > 1 ? 'es' : ''} ignored</div>`;
+        }
+      }
+      dayDetail.innerHTML = detailHtml;
+    } else {
+      dayDetail.innerHTML = `<div class="empty-note" style="padding:0;">Tap a weekday above to see its detail.</div>`;
+    }
+    monthTotalEl.textContent = fmtDur(monthTotalMs);
+    monthTitle.textContent = viewMonthDate.toLocaleDateString([], { month: 'long', year: 'numeric' });
 
     dateLine.textContent = now.toLocaleDateString([], { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
   }
@@ -824,48 +991,65 @@
     manualAddPanel.style.display = 'none';
   });
 
-  // Export Mon-Fri to Excel CSV
+  // Export the currently viewed month to CSV (opens fine in Excel/Calc)
   exportExcelBtn.addEventListener('click', () => {
     const now = new Date();
-    const weekStart = startOfWeek(now);
     const todayKey = dateStr(now);
-    const dows = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+    const dowNamesFull = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const monthWeekdays = getMonthWeekdays(viewMonthDate);
 
     let csvRows = [];
     csvRows.push(['Date', 'Day', 'IN Time', 'OUT Time', 'Duration']);
 
-    let totalWeekMs = 0;
+    let totalMonthMs = 0;
 
-    for (let i = 0; i < 5; i++) {
-      const d = new Date(weekStart);
-      d.setDate(weekStart.getDate() + i);
+    monthWeekdays.forEach(d => {
       const key = dateStr(d);
       const doc = daysCache[key] || { date: key, punches: [] };
       const dayPunches = normalizeDayPunches(doc.punches || []);
 
       // Day total follows the first-in (before 1pm) / last-out (at/after 2pm) rule
       const dayMs = workedMs(dayPunches, key === todayKey ? now.getTime() : null);
-      totalWeekMs += dayMs;
+      totalMonthMs += dayMs;
 
       const eff = getEffectiveDayPunches(dayPunches);
       const inStr = eff.inPunch ? new Date(eff.inPunch.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'NO PUNCH';
       const outStr = eff.outPunch ? new Date(eff.outPunch.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'NO PUNCH';
 
-      csvRows.push([key, dows[i], inStr, outStr, fmtDur(dayMs)]);
-    }
+      csvRows.push([key, dowNamesFull[d.getDay()], inStr, outStr, fmtDur(dayMs)]);
+    });
 
     csvRows.push([]);
-    csvRows.push(['Total Mon-Fri Hours:', '', '', '', fmtDur(totalWeekMs)]);
+    csvRows.push([`Total ${viewMonthDate.toLocaleDateString([], { month: 'long', year: 'numeric' })} Hours:`, '', '', '', fmtDur(totalMonthMs)]);
 
     let csvContent = "\uFEFF" + csvRows.map(row => row.map(cell => `"${cell}"`).join(',')).join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `TimeCard_Mon_Fri_${dateStr(now)}.csv`;
+    const fileMonth = `${viewMonthDate.getFullYear()}-${pad(viewMonthDate.getMonth() + 1)}`;
+    link.download = `TimeCard_${fileMonth}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+  });
+
+  // Month navigation for the calendar / export
+  prevMonthBtn.addEventListener('click', () => {
+    viewMonthDate.setMonth(viewMonthDate.getMonth() - 1);
+    render();
+  });
+  nextMonthBtn.addEventListener('click', () => {
+    viewMonthDate.setMonth(viewMonthDate.getMonth() + 1);
+    render();
+  });
+
+  // Tap a weekday cell in the calendar to see its detail below
+  calendarGrid.addEventListener('click', (e) => {
+    const cell = e.target.closest('.cal-cell');
+    if (!cell || cell.classList.contains('empty') || cell.dataset.weekend === 'true') return;
+    selectedDayKey = cell.dataset.key;
+    render();
   });
 
   // Backup / Restore
@@ -912,6 +1096,7 @@
   function init() {
     daysCache = lsReadAll();
     syncNote.textContent = 'Offline mode — saved on this phone/browser.';
+    selectedDayKey = dateStr(new Date());
     render();
     tickClock();
   }
