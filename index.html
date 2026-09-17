@@ -499,10 +499,9 @@
       <span class="figure" id="weekTotal">0h 0m</span>
     </div>
 
-    <!-- Month Detailed Ledger & Excel Export -->
-    <div class="section-label" style="display:flex; justify-content:space-between; align-items:center; margin-top:32px;">
+    <!-- Month Detailed Ledger -->
+    <div class="section-label" style="margin-top:32px;">
       <span>Month Entries</span>
-      <button id="exportExcelBtn" class="small-btn" style="flex:none; padding:4px 10px;" type="button">📥 Export Excel</button>
     </div>
     <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
       <button class="mini-btn" id="prevMonthBtn" type="button" style="flex:none; padding:6px 12px;">◀</button>
@@ -517,6 +516,15 @@
       <span>Month total</span>
       <span class="figure" id="monthTotal">0h 0m</span>
     </div>
+
+    <!-- Excel Export -->
+    <div class="section-label" style="margin-top:32px;">Export to Excel</div>
+    <div class="ledger-caption" style="margin-top:-2px;">Choose a date range. Missing punches will prompt you to fill them in or skip that day.</div>
+    <div class="manual-fields" style="margin-bottom:10px;">
+      <input type="date" id="exportFrom">
+      <input type="date" id="exportTo">
+    </div>
+    <button id="exportExcelBtn" class="small-btn" type="button">📥 Export Excel (.xlsx)</button>
 
     <div class="sync-note" id="syncNote">Connecting…</div>
 
@@ -533,6 +541,7 @@
     </div>
   </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script>
 (function () {
   const punchBtn = document.getElementById('punchBtn');
@@ -545,6 +554,8 @@
   const weekTotalEl = document.getElementById('weekTotal');
   const syncNote = document.getElementById('syncNote');
   const exportExcelBtn = document.getElementById('exportExcelBtn');
+  const exportFromInput = document.getElementById('exportFrom');
+  const exportToInput = document.getElementById('exportTo');
   const calendarGrid = document.getElementById('calendarGrid');
   const dayDetail = document.getElementById('dayDetail');
   const prevMonthBtn = document.getElementById('prevMonthBtn');
@@ -991,47 +1002,107 @@
     manualAddPanel.style.display = 'none';
   });
 
-  // Export the currently viewed month to CSV (opens fine in Excel/Calc)
+  // The fixed reason text required on every exported row
+  const EXPORT_REASON = 'Posted at client location NCRB Delhi for CCTNS 2.0 development activities.';
+
+  function parseHHMM(str) {
+    if (!str) return null;
+    const m = str.trim().match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) return null;
+    const hh = parseInt(m[1], 10);
+    const mm = parseInt(m[2], 10);
+    if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+    return { hh, mm };
+  }
+
+  // Export the chosen date range to a real .xlsx file, matching the required
+  // template: Date (dd-mmm-yyyy, Date cell), In Time (hh:mm, Time cell),
+  // Out Time (hh:mm, Time cell), Reason (text). Days missing a punch prompt
+  // the user to fill it in manually or skip the day (never a blank row).
   exportExcelBtn.addEventListener('click', () => {
+    if (typeof XLSX === 'undefined') {
+      alert('Excel export library failed to load. Check your connection and try again.');
+      return;
+    }
+    const fromVal = exportFromInput.value;
+    const toVal = exportToInput.value;
+    if (!fromVal || !toVal) { alert('Pick both a "from" and "to" date first.'); return; }
+
+    const [fy, fm, fd] = fromVal.split('-').map(Number);
+    const [ty, tm, td] = toVal.split('-').map(Number);
+    const fromDate = new Date(fy, fm - 1, fd);
+    const toDate = new Date(ty, tm - 1, td);
+    if (fromDate > toDate) { alert('"From" date must be before or equal to "To" date.'); return; }
+
     const now = new Date();
     const todayKey = dateStr(now);
-    const dowNamesFull = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    const monthWeekdays = getMonthWeekdays(viewMonthDate);
+    const rows = [];
 
-    let csvRows = [];
-    csvRows.push(['Date', 'Day', 'IN Time', 'OUT Time', 'Duration']);
+    for (let d = new Date(fromDate); d <= toDate; d.setDate(d.getDate() + 1)) {
+      const dayDate = new Date(d);
+      const key = dateStr(dayDate);
+      const dow = dayDate.getDay(); // 0 = Sun, 6 = Sat
+      const isWeekend = dow === 0 || dow === 6;
 
-    let totalMonthMs = 0;
-
-    monthWeekdays.forEach(d => {
-      const key = dateStr(d);
       const doc = daysCache[key] || { date: key, punches: [] };
       const dayPunches = normalizeDayPunches(doc.punches || []);
-
-      // Day total follows the first-in (before 1pm) / last-out (at/after 2pm) rule
-      const dayMs = workedMs(dayPunches, key === todayKey ? now.getTime() : null);
-      totalMonthMs += dayMs;
-
       const eff = getEffectiveDayPunches(dayPunches);
-      const inStr = eff.inPunch ? new Date(eff.inPunch.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'NO PUNCH';
-      const outStr = eff.outPunch ? new Date(eff.outPunch.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'NO PUNCH';
 
-      csvRows.push([key, dowNamesFull[d.getDay()], inStr, outStr, fmtDur(dayMs)]);
-    });
+      let inDate = eff.inPunch ? new Date(eff.inPunch.ts) : null;
+      let outDate = eff.outPunch ? new Date(eff.outPunch.ts) : null;
 
-    csvRows.push([]);
-    csvRows.push([`Total ${viewMonthDate.toLocaleDateString([], { month: 'long', year: 'numeric' })} Hours:`, '', '', '', fmtDur(totalMonthMs)]);
+      if (!inDate || !outDate) {
+        // Silently skip weekends with nothing recorded at all — don't pester
+        // the user about days that were never meant to have punches.
+        if (isWeekend && dayPunches.length === 0) continue;
 
-    let csvContent = "\uFEFF" + csvRows.map(row => row.map(cell => `"${cell}"`).join(',')).join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    const fileMonth = `${viewMonthDate.getFullYear()}-${pad(viewMonthDate.getMonth() + 1)}`;
-    link.download = `TimeCard_${fileMonth}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+        const label = dayDate.toLocaleDateString([], { day: '2-digit', month: 'short', year: 'numeric' });
+        const missing = (!inDate && !outDate) ? 'a punch-in and punch-out time' : (!inDate ? 'a punch-in time' : 'a punch-out time');
+        const wantsManual = confirm(`${label} is missing ${missing}. Do you want to enter it manually?`);
+        if (!wantsManual) continue; // skip this day entirely — not added to the export
+
+        if (!inDate) {
+          const t = parseHHMM(prompt(`Enter IN time for ${label} (24-hour HH:MM, e.g. 09:00):`, '09:00'));
+          if (t) inDate = new Date(dayDate.getFullYear(), dayDate.getMonth(), dayDate.getDate(), t.hh, t.mm, 0);
+        }
+        if (!outDate) {
+          const t = parseHHMM(prompt(`Enter OUT time for ${label} (24-hour HH:MM, e.g. 18:00):`, '18:00'));
+          if (t) outDate = new Date(dayDate.getFullYear(), dayDate.getMonth(), dayDate.getDate(), t.hh, t.mm, 0);
+        }
+        // Still missing after being asked (blank/invalid input) — skip the day
+        if (!inDate || !outDate) continue;
+      }
+
+      // Date-only value (midnight) for the Date column
+      const dateOnly = new Date(dayDate.getFullYear(), dayDate.getMonth(), dayDate.getDate());
+      rows.push([dateOnly, inDate, outDate, EXPORT_REASON]);
+    }
+
+    if (rows.length === 0) {
+      alert('No rows to export for that range — nothing had valid in/out punches (or you chose to skip every day).');
+      return;
+    }
+
+    const aoa = [['Date', 'In Time', 'Out Time', 'Reason'], ...rows];
+    const ws = XLSX.utils.aoa_to_sheet(aoa, { cellDates: true });
+
+    // Apply the required cell formats per row: Date -> dd-mmm-yyyy, times -> hh:mm
+    for (let r = 0; r < rows.length; r++) {
+      const excelRow = r + 2; // header is row 1
+      const dCell = ws['A' + excelRow];
+      const inCell = ws['B' + excelRow];
+      const outCell = ws['C' + excelRow];
+      if (dCell) { dCell.t = 'd'; dCell.z = 'dd-mmm-yyyy'; }
+      if (inCell) { inCell.t = 'd'; inCell.z = 'hh:mm'; }
+      if (outCell) { outCell.t = 'd'; outCell.z = 'hh:mm'; }
+    }
+    ws['!cols'] = [{ wch: 14 }, { wch: 10 }, { wch: 10 }, { wch: 60 }];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+
+    const fileLabel = `${fromVal}_to_${toVal}`;
+    XLSX.writeFile(wb, `TimeCard_${fileLabel}.xlsx`);
   });
 
   // Month navigation for the calendar / export
@@ -1097,6 +1168,13 @@
     daysCache = lsReadAll();
     syncNote.textContent = 'Offline mode — saved on this phone/browser.';
     selectedDayKey = dateStr(new Date());
+
+    const now = new Date();
+    const firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const lastOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    exportFromInput.value = dateStr(firstOfMonth);
+    exportToInput.value = dateStr(lastOfMonth);
+
     render();
     tickClock();
   }
